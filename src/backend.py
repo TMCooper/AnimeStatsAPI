@@ -34,7 +34,7 @@ class Cardinal:
         conn.commit()
         conn.close()
 
-
+    @staticmethod
     def statCollect(nom_anime, saison_num, num_episode):
         jour = datetime.now().strftime("%Y-%m-%d")
         timestamp = int(time.time())
@@ -50,6 +50,7 @@ class Cardinal:
         conn.commit()
         conn.close()
 
+    @staticmethod
     def getStats(p):
         time.sleep(1.5)
         if p == ADMIN_PASSWORD:
