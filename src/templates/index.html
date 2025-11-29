@@ -546,178 +546,184 @@
 
         // --- PARSING AMÉLIORÉ ---
         function parseSeasonInfo(val) {
-            const str = String(val).toLowerCase();
-            let info = { num: 1, isRemake: false, isMovie: false };
+            const str = String(val || "").toLowerCase();
+            let info = { num: 1, isRemake: false, isMovie: false, remakeYear: null };
 
             if (!val) return info;
 
-            if (str.includes('film') || str.includes('movie') || str.includes('oav')) {
-                info.isMovie = true;
-                return info;
-            }
-            if (str === "film" || str === "movie") {
+            // --- Films ---
+            if (str.includes("film") || str.includes("movie") || str.includes("oav")) {
                 info.isMovie = true;
                 info.num = 1;
                 return info;
             }
 
+            // --- Remakes avec années : "remake2024", "remake 2024", "remake_2024" ---
             if (str.includes("remake")) {
                 info.isRemake = true;
 
-                // Capture "remake2024" OU "remake 2024" OU "remake_2024"
                 const yearMatch = str.match(/remake[\s_]*([0-9]{4})/);
-                if (yearMatch) {
-                    info.remakeYear = parseInt(yearMatch[1]);
-                }
+                if (yearMatch) info.remakeYear = parseInt(yearMatch[1]);
 
-                // Remake = par défaut on prend la version la plus récente
+                // Forcer le tri vers le plus récent
                 info.num = 9999;
-
                 return info;
             }
 
+            // --- Saison classique (saison1, saison 2, s1, s2, "1") ---
             const match = str.match(/\d+/);
             if (match) info.num = parseInt(match[0]);
-            
+
             return info;
         }
 
-        async function smartFetchMetadata(title, dbInfo) { 
-            // --- Nettoyage très doux (conserve mieux les titres FR)
+        async function smartFetchMetadata(title, dbInfo) {
+
+            // Nettoyage doux
             let cleanTitle = title
                 .toLowerCase()
                 .replace(/\(.*?\)/g, '')
                 .replace(/\[.*?\]/g, '')
-                .replace(/film|movie|saison\s*\d+|season\s*\d+|s\d+/g, '')
+                .replace(/film|movie|saison\s*\d+|season\s*\d+|remake\d*/g, '')
                 .trim();
 
-            const cacheKey = `v3_${cleanTitle}_${dbInfo.isMovie ? 'M' : 'TV'}_s${dbInfo.num}`;
+            const cacheKey = `v3_${cleanTitle}_${dbInfo.isMovie ? 'M' : 'TV'}_${dbInfo.isRemake ? 'R' : ''}_s${dbInfo.num}`;
             const cached = localStorage.getItem(cacheKey);
-            if (cached) {
-                const el = document.getElementById('loadingCache');
-                if(el) el.innerText = parseInt(el.innerText || 0) + 1;
-                return JSON.parse(cached);
-            }
 
-            // --- Première requête (normale)
-            const meta1 = await fetchAndPickBest(cleanTitle, dbInfo);
+            if (cached) return JSON.parse(cached);
 
-            // Si données complètes : terminé
-            if (meta1 && (meta1.year || (meta1.studios && meta1.studios.length))) {
+            // --- Première recherche ---
+            let meta1 = await fetchAndPickBest(cleanTitle, dbInfo);
+
+            // Si meta1 complète → fin
+            if (meta1 && (meta1.year || (meta1.studios?.length))) {
                 localStorage.setItem(cacheKey, JSON.stringify(meta1));
                 return meta1;
             }
 
-            // --- Seconde tentative : stricte
-            const meta2 = await fetchAndPickBest(meta1?.title_en || cleanTitle, dbInfo, true);
+            // --- Dictionnaire FR → EN ---
+            const TITLE_FR_EN = {
+                "dahliya artisane magicienne": "Dahliya in Bloom",
+                "maquia when the promised flower blooms": "Maquia"
+            };
 
-            const finalMeta = meta2 || meta1;
-            if (!meta1 || (!meta1.year && !meta1.studios?.length)) {
-
-                // dictionnaire FR → EN
-                const TITLE_FR_EN = {
-                    "dahliya artisane magicienne": "Dahliya in Bloom",
-                };
-
-                const alt = TITLE_FR_EN[cleanTitle];
-                if (alt) {
-                    const meta2 = await fetchAndPickBest(alt, dbInfo, true);
-                    if (meta2) return meta2;
+            let alt = TITLE_FR_EN[cleanTitle];
+            if (alt) {
+                let meta2 = await fetchAndPickBest(alt, dbInfo, true);
+                if (meta2) {
+                    localStorage.setItem(cacheKey, JSON.stringify(meta2));
+                    return meta2;
                 }
             }
-            
-            localStorage.setItem(cacheKey, JSON.stringify(finalMeta));
-            return finalMeta;
+
+            // --- Tentative stricte titre EN fourni par meta1 ---
+            if (meta1?.title_en) {
+                let meta3 = await fetchAndPickBest(meta1.title_en, dbInfo, true);
+                if (meta3) {
+                    localStorage.setItem(cacheKey, JSON.stringify(meta3));
+                    return meta3;
+                }
+            }
+
+            // --- Dernier fallback ---
+            localStorage.setItem(cacheKey, JSON.stringify(meta1));
+            return meta1;
         }
+
 
 
         async function fetchAndPickBest(query, dbInfo, strict = false) {
             try {
                 await sleep(300 + Math.random() * 200);
-                document.getElementById('loadingCalls').innerText++;
 
                 const res = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(query)}&limit=25`);
                 if (!res.ok) return null;
 
                 const json = await res.json();
-                let candidates = json.data || [];
+                if (!json.data?.length) return null;
 
-                if (!candidates.length) return null;
+                let candidates = json.data;
 
-                // --- Filtre par type (Movie / TV)
-                candidates = candidates.filter(x => {
-                    if (dbInfo.isMovie) return x.type === 'Movie';
-                    return x.type === 'TV' || x.type === 'ONA';
-                });
+                const words = query.toLowerCase().split(/\s+/).filter(w => w.length > 2);
 
-                if (!candidates.length) return null;
-
-                // --- Nettoyage titres pour comparaison
-                const q = query.toLowerCase().trim();
-
-                // --- Filtre de pertinence
                 candidates = candidates.filter(x => {
                     const titles = [
-                        x.title, 
-                        x.title_english,
-                        ...(x.titles || []).map(t => t.title)
-                    ].filter(Boolean).map(t => t.toLowerCase());
+                        x.title?.toLowerCase() || "",
+                        x.title_english?.toLowerCase() || "",
+                        ...(x.titles || []).map(t => t.title.toLowerCase())
+                    ];
 
-                    if (titles.includes(q)) return true;
-                    if (strict) return similarity(titles[0] || "", q) > 0.70;
-
-                    // Souple mais pas trop
-                    return titles.some(t => similarity(t, q) > 0.55);
+                    // Un candidat doit contenir au moins 70% des mots du titre original
+                    return titles.some(t => {
+                        let count = 0;
+                        words.forEach(w => { if (t.includes(w)) count++; });
+                        return count >= Math.ceil(words.length * 0.7);
+                    });
                 });
+
+                // Type
+                if (dbInfo.isMovie)
+                    candidates = candidates.filter(x => x.type === "Movie" || x.type === "OVA");
+                else
+                    candidates = candidates.filter(x => x.type === "TV" || x.type === "ONA");
+
+                // Statut
+                candidates = candidates.filter(x => x.status !== "Not yet aired");
 
                 if (!candidates.length) return null;
 
-                // --- Classement par année pour choisir le meilleur
-                candidates.sort((a, b) => {
-                    const ya = a.year || (a.aired?.from ? new Date(a.aired.from).getFullYear() : 0);
-                    const yb = b.year || (b.aired?.from ? new Date(b.aired.from).getFullYear() : 0);
-                    return ya - yb;
-                });
-
-                let best = candidates[0];
-
-                // Si saison X → prendre le meilleur indice 
-                if (!dbInfo.isMovie && !strict) {
-                    const idx = dbInfo.num - 1;
-                    if (idx < candidates.length) best = candidates[idx];
-                }
-                if (dbInfo.remakeYear) {
-                    candidates.sort((a, b) => {
-                        const ya = a.year || 0;
-                        const yb = b.year || 0;
-                        return Math.abs(ya - dbInfo.remakeYear) - Math.abs(yb - dbInfo.remakeYear);
-                    });
-                    best = candidates[0];
+                // Similarité stricte en mode strict
+                if (strict) {
+                    candidates = candidates.filter(x =>
+                        (x.title_english || x.title || "").toLowerCase().includes(query.toLowerCase())
+                    );
+                    if (!candidates.length) return null;
                 }
 
-                // --- Construction du meta final
+                // Tri année croissante
+                candidates.sort((a, b) => (a.year || 0) - (b.year || 0));
+
+                let best = null;
+
+                // --- Remake : on prend le plus récent ou celui proche de l'année ---
+                if (dbInfo.isRemake) {
+                    if (dbInfo.remakeYear) {
+                        candidates.sort(
+                            (a, b) => Math.abs((a.year || 0) - dbInfo.remakeYear) - Math.abs((b.year || 0) - dbInfo.remakeYear)
+                        );
+                        best = candidates[0];
+                    } else {
+                        best = candidates[candidates.length - 1];
+                    }
+                }
+                else best = candidates[dbInfo.num - 1] || candidates[0];
+
+                if (!best) return null;
+
+                const img = best.images?.webp?.large_image_url || best.images?.jpg?.large_image_url || DEFAULT_IMG;
+
                 return {
                     title: best.title,
                     title_en: best.title_english || best.title,
-                    image: best.images?.webp?.large_image_url || best.images?.jpg?.large_image_url || DEFAULT_IMG,
-                    score: best.score || 0,
-                    studios: best.studios?.map(s => s.name) || [],
-                    genres: best.genres?.map(g => g.name) || [],
-                    demographics: best.demographics?.map(d => d.name) || [],
-                    source: best.source || "Unknown",
+                    image: img,
+                    score: best.score,
+                    studios: best.studios.map(s => s.name),
+                    genres: best.genres.map(g => g.name),
+                    demographics: (best.demographics || []).map(d => d.name),
+                    source: best.source,
                     year: best.year || (best.aired?.from ? new Date(best.aired.from).getFullYear() : null),
-                    db_season_disp: dbInfo.isMovie ? "Film" : dbInfo.isRemake
+                    db_season_disp: dbInfo.isMovie
+                        ? "Film"
+                        : dbInfo.isRemake
                             ? `Remake ${dbInfo.remakeYear || ''}`.trim()
                             : `Saison ${dbInfo.num}`,
                     episodes: best.episodes || (dbInfo.isMovie ? 1 : 12),
-                    url: best.url,
+                    url: best.url
                 };
-
-            } catch (e) {
-                console.warn(e);
-                return null;
             }
+            catch (e) { return null; }
         }
+
 
 
         function createFallback(title, dbInfo) {
