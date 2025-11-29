@@ -528,6 +528,22 @@
             }
         }
 
+        function similarity(a, b) {
+            a = a.toLowerCase();
+            b = b.toLowerCase();
+            const longer = a.length > b.length ? a : b;
+            const shorter = a.length > b.length ? b : a;
+
+            const longerLength = longer.length;
+            if (longerLength === 0) return 1.0;
+
+            let same = 0;
+            for (let i = 0; i < shorter.length; i++) {
+                if (longer[i] === shorter[i]) same++;
+            }
+            return same / longerLength;
+        }
+
         // --- PARSING AMÉLIORÉ ---
         function parseSeasonInfo(val) {
             const str = String(val).toLowerCase();
@@ -604,9 +620,17 @@
 
                     // Filtre Pertinence
                     candidates = candidates.filter(x => {
-                        const tEn = (x.title_english || "").toLowerCase();
-                        const tJp = (x.title || "").toLowerCase();
-                        return tEn.includes(cleanTitle) || tJp.includes(cleanTitle) || cleanTitle.includes(tEn) || cleanTitle.includes(tJp);
+                        const titles = [
+                            x.title,
+                            x.title_english,
+                            ...(x.titles || []).map(t => t.title)
+                        ].filter(Boolean).map(t => t.toLowerCase());
+
+                        // Match exact "Kaoru Hana wa Rin to Saku"
+                        if (titles.includes(cleanTitle)) return true;
+
+                        // Match strict : >= 75% similarité
+                        return titles.some(t => similarity(t, cleanTitle) >= 0.75);
                     });
 
                     if (candidates.length === 0) return createFallback(title, dbInfo);
