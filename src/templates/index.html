@@ -516,8 +516,8 @@
         let rawData = [];
         let chartInstances = {};
 
-        // Image par défaut (Gris propre)
-        const DEFAULT_IMG = "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22%3E%3Crect fill=%22%231e293b%22 width=%2240%22 height=%2240%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 fill=%22%23475569%22 font-size=%2210%22 font-family=%22sans-serif%22%3E?%3C/text%3E%3C/svg%3E";
+        // Image par défaut
+        const DEFAULT_IMG = "https://placehold.co/400x600/1e293b/white?text=No+Image";
 
         const sleep = ms => new Promise(r => setTimeout(r, ms));
 
@@ -528,55 +528,45 @@
             }
         }
 
-        function parseSeason(val) {
-            if (typeof val === 'number') return val;
-            if (!val) return 1;
+        // --- PARSING AMÉLIORÉ ---
+        function parseSeasonInfo(val) {
             const str = String(val).toLowerCase();
-            if (str.includes('film') || str.includes('movie') || str.includes('oav')) return 1; 
+            let info = { num: 1, isRemake: false, isMovie: false };
+
+            if (!val) return info;
+
+            if (str.includes('film') || str.includes('movie') || str.includes('oav')) {
+                info.isMovie = true;
+                return info;
+            }
+
+            if (str.includes('remake')) {
+                info.isRemake = true;
+                const match = str.match(/saison\s*(\d+)/) || str.match(/s(\d+)/);
+                if (match) info.num = parseInt(match[1]);
+                return info;
+            }
+
             const match = str.match(/\d+/);
-            return match ? parseInt(match[0]) : 1;
+            if (match) info.num = parseInt(match[0]);
+            
+            return info;
         }
 
-        // Vérifie si le titre trouvé par l'API ressemble vraiment à ce qu'on cherche
-        function checkSimilarity(searchQuery, apiResult) {
-            // Nettoyage : minuscules, suppression symboles, découpage en mots
-            const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2);
-            
-            const searchWords = normalize(searchQuery);
-            const titleEn = normalize(apiResult.title_english || "");
-            const titleJp = normalize(apiResult.title || "");
-            
-            // Si la recherche est trop courte (ex: "K"), on est permissif
-            if(searchWords.length === 0) return true;
-
-            // On vérifie combien de mots de notre recherche sont présents dans le résultat
-            const checkMatch = (targetWords) => {
-                let matches = 0;
-                searchWords.forEach(w => { if (targetWords.includes(w)) matches++; });
-                return matches;
-            };
-
-            const matchesEn = checkMatch(titleEn);
-            const matchesJp = checkMatch(titleJp);
-
-            // Si au moins 50% des mots clés correspondent, on accepte
-            const threshold = searchWords.length * 0.5;
-            return Math.max(matchesEn, matchesJp) >= threshold;
-        }
-
-        async function smartFetchMetadata(title, dbSeasonRaw) { 
-            // 1. Nettoyage du titre pour la recherche API
-            let cleanTitle = title
-                .replace(/\[.*?\]/g, '')
-                .replace(/\(.*?\)/g, '')
-                .replace(/saison?\s*\d+/gi, '')
-                .replace(/season\s*\d+/gi, '')
-                .replace(/s\d+/gi, '')
-                .replace(/\.(mkv|mp4|avi)/gi, '')
+        async function smartFetchMetadata(title, dbInfo) { 
+            let cleanTitle = title.toLowerCase()
+                .replace(/remake\d*/g, '')
+                .replace(/saison\s*\d+/g, '')
+                .replace(/season\s*\d+/g, '')
+                .replace(/film/g, '')
+                .replace(/movie/g, '')
+                .replace(/s\d+/g, '')
+                .replace(/[\[\(].*?[\]\)]/g, '')
+                .replace(/\.(mkv|mp4|avi)/g, '')
                 .replace(/_/g, ' ')
                 .trim();
 
-            const cacheKey = `trends_v18_${cleanTitle.toLowerCase()}_s${dbSeasonRaw}`; 
+            const cacheKey = `trends_v23_${cleanTitle}_${dbInfo.isMovie ? 'M' : 'TV'}_${dbInfo.isRemake ? 'R' : ''}_s${dbInfo.num}`; 
             const cached = localStorage.getItem(cacheKey);
 
             if (cached) {
@@ -585,75 +575,73 @@
                 return JSON.parse(cached);
             }
 
-            const dbSeasonNum = parseSeason(dbSeasonRaw);
-            const isRemakeMarker = isNaN(parseInt(dbSeasonRaw)) || String(dbSeasonRaw).toLowerCase().includes('remake'); 
-
             try {
                 await sleep(400 + Math.random() * 200);
                 const el = document.getElementById('loadingCalls');
                 if(el) el.innerText = parseInt(el.innerText || 0) + 1;
 
-                const res = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(cleanTitle)}&limit=20`);
+                const res = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(cleanTitle)}&limit=25`);
 
                 if (res.status === 429) {
                     await sleep(3000); 
-                    return smartFetchMetadata(title, dbSeasonRaw);
+                    return smartFetchMetadata(title, dbInfo);
                 }
 
                 const json = await res.json();
 
                 if (json.data && json.data.length > 0) {
-                    // Filtrage types
-                    let candidates = json.data.filter(x => x.type === 'TV' || x.type === 'ONA' || x.type === 'OVA' || x.type === 'Movie');
-                    
-                    // --- FILTRAGE DE SÉCURITÉ ---
-                    // On ne garde que les animes dont le titre correspond vraiment
-                    candidates = candidates.filter(cand => checkSimilarity(cleanTitle, cand));
+                    let candidates = json.data;
 
-                    if (candidates.length === 0 && json.data.length > 0) {
-                         // Tentative de fallback soft
-                         candidates = json.data;
+                    // Filtre Type
+                    if (dbInfo.isMovie) {
+                        candidates = candidates.filter(x => x.type === 'Movie' || x.type === 'ONA');
+                    } else {
+                        candidates = candidates.filter(x => x.type === 'TV' || x.type === 'ONA');
                     }
 
-                    // Tri par année
+                    // Filtre Statut (Pas de futur)
+                    candidates = candidates.filter(x => x.status !== 'Not yet aired');
+
+                    // Filtre Pertinence
+                    candidates = candidates.filter(x => {
+                        const tEn = (x.title_english || "").toLowerCase();
+                        const tJp = (x.title || "").toLowerCase();
+                        return tEn.includes(cleanTitle) || tJp.includes(cleanTitle) || cleanTitle.includes(tEn) || cleanTitle.includes(tJp);
+                    });
+
+                    if (candidates.length === 0) return createFallback(title, dbInfo);
+
+                    // Tri Année
                     candidates.sort((a, b) => {
-                        const yearA = a.year || (a.aired && a.aired.from ? new Date(a.aired.from).getFullYear() : 9999);
-                        const yearB = b.year || (b.aired && b.aired.from ? new Date(b.aired.from).getFullYear() : 9999);
+                        const yearA = a.year || (a.aired?.from ? new Date(a.aired.from).getFullYear() : 0);
+                        const yearB = b.year || (b.aired?.from ? new Date(b.aired.from).getFullYear() : 0);
                         return yearA - yearB; 
                     });
 
                     let bestMatch = null;
 
-                    if (isRemakeMarker) {
-                        // Pour un remake, on veut le plus récent
-                        const newestCandidates = [...candidates].sort((a, b) => {
-                            const yearA = a.year || (a.aired && a.aired.from ? new Date(a.aired.from).getFullYear() : 0);
-                            const yearB = b.year || (b.aired && b.aired.from ? new Date(b.aired.from).getFullYear() : 0);
-                            return yearB - yearA;
-                        });
-                        bestMatch = newestCandidates[0];
+                    if (dbInfo.isRemake) {
+                        bestMatch = candidates[candidates.length - 1];
+                    } else if (dbInfo.isMovie) {
+                        bestMatch = candidates[0];
                     } else {
-                        // Pour une saison normale, on prend l'index (S1 = index 0)
-                        const targetIndex = dbSeasonNum - 1; 
-                        if (targetIndex < candidates.length) {
-                            bestMatch = candidates[targetIndex];
+                        const idx = dbInfo.num - 1;
+                        if (idx < candidates.length) {
+                            bestMatch = candidates[idx];
                         } else {
-                            bestMatch = candidates[candidates.length - 1]; 
+                            bestMatch = candidates[candidates.length - 1];
                         }
                     }
-                    
-                    // Si toujours rien, on crée un objet dummy
-                    if (!bestMatch) throw new Error("No secure match found");
 
-                    let demos = bestMatch.demographics.map(d => d.name);
-                    if (demos.length === 0) {
-                        const knownDemos = ['Shounen', 'Seinen', 'Shoujo', 'Josei', 'Kids'];
-                        bestMatch.genres.forEach(g => {
-                            if (knownDemos.includes(g.name)) demos.push(g.name);
-                        });
-                    }
+                    if (!bestMatch) return createFallback(title, dbInfo);
 
                     const imgUrl = bestMatch.images?.webp?.large_image_url || bestMatch.images?.jpg?.large_image_url || DEFAULT_IMG;
+                    
+                    let demos = bestMatch.demographics.map(d => d.name);
+                    if (demos.length === 0 && bestMatch.genres) {
+                        const known = ['Shounen', 'Seinen', 'Shoujo', 'Josei', 'Kids'];
+                        bestMatch.genres.forEach(g => { if(known.includes(g.name)) demos.push(g.name); });
+                    }
 
                     const meta = {
                         title: bestMatch.title,
@@ -664,31 +652,33 @@
                         genres: bestMatch.genres.map(g => g.name),
                         demographics: demos,
                         source: bestMatch.source,
-                        year: bestMatch.year || (bestMatch.aired && bestMatch.aired.from ? new Date(bestMatch.aired.from).getFullYear() : null),
-                        db_season: dbSeasonRaw, 
-                        episodes: bestMatch.episodes || 12,
+                        year: bestMatch.year || (bestMatch.aired?.from ? new Date(bestMatch.aired.from).getFullYear() : null),
+                        db_season_disp: dbInfo.isMovie ? "Film" : (dbInfo.isRemake ? "Remake" : `Saison ${dbInfo.num}`),
+                        episodes: bestMatch.episodes || (dbInfo.isMovie ? 1 : 12),
                         url: bestMatch.url,
                         timestamp: Date.now()
                     };
+                    
                     localStorage.setItem(cacheKey, JSON.stringify(meta));
                     return meta;
                 }
-            } catch (e) { 
-                // En cas d'erreur ou pas de correspondance, on retourne l'entrée brute
-                const fallback = { 
-                    title: title,
-                    title_en: title, 
-                    genres: [], studios: [], demographics: [], source: 'Local DB', score: 0, 
-                    year: null, 
-                    image: DEFAULT_IMG, 
-                    db_season: dbSeasonRaw, episodes: 12, url: '#' 
-                };
-                // On met en cache le fallback pour ne pas spammer l'API
-                localStorage.setItem(cacheKey, JSON.stringify(fallback));
-                return fallback;
-            }
-            
-            return { title_en: title, image: DEFAULT_IMG, db_season: dbSeasonRaw, score: 0, genres: [], studios: [], local_files: 0, dates: [] };
+            } catch (e) { console.warn(e); }
+
+            return createFallback(title, dbInfo);
+        }
+
+        function createFallback(title, dbInfo) {
+            return {
+                title_en: title,
+                image: DEFAULT_IMG,
+                year: null,
+                studios: [], genres: [], demographics: [],
+                score: 0,
+                local_files: 0,
+                db_season_disp: dbInfo.isMovie ? "Film" : `Saison ${dbInfo.num}`,
+                episodes: dbInfo.isMovie ? 1 : 12,
+                url: '#'
+            };
         }
 
         async function init() {
@@ -700,30 +690,23 @@
             const startTime = Date.now();
 
             try {
-                lText.innerText = 'Establishing secure connection...';
+                lText.innerText = 'Connecting...';
                 const res = await fetch(`/api/getStats`, { headers: { 'X-Admin-Token': TOKEN } });
-                
                 if (!res.ok) throw new Error("API Fetch failed");
-
                 rawData = await res.json();
 
-                lText.innerText = 'Aggregating local database...';
+                lText.innerText = 'Processing local database...';
                 const localMap = {};
                 
                 rawData.forEach(row => {
                     const title = row[1];
                     const seasonRaw = row[2];
+                    const info = parseSeasonInfo(seasonRaw);
                     const ts = row[5];
-                    const uniqueKey = `${title}_S${seasonRaw}`; 
+                    const uniqueKey = `${title}_${info.isMovie}_${info.isRemake}_${info.num}`; 
 
                     if (!localMap[uniqueKey]) {
-                        localMap[uniqueKey] = { 
-                            title: title,
-                            season_raw: seasonRaw,
-                            count: 0, 
-                            first_ts: ts, 
-                            dates: [] 
-                        };
+                        localMap[uniqueKey] = { title, dbInfo: info, count: 0, first_ts: ts, dates: [] };
                     }
                     localMap[uniqueKey].count++;
                     localMap[uniqueKey].dates.push({ date: row[4], timestamp: ts });
@@ -735,10 +718,10 @@
                 let processed = 0;
 
                 for (const entry of entries) {
-                    lText.innerText = `Neural processing: ${entry.title} (S${entry.season_raw})...`;
+                    lText.innerText = `Analyzing: ${entry.title}...`;
                     lTitles.innerText = processed + 1;
                     
-                    const meta = await smartFetchMetadata(entry.title, entry.season_raw); 
+                    const meta = await smartFetchMetadata(entry.title, entry.dbInfo); 
                     
                     tempLibrary.push({
                         ...meta,
@@ -747,35 +730,25 @@
                         first_seen: entry.first_ts
                     });
                     processed++;
-                    const percent = Math.round((processed / entries.length) * 100);
-                    pBar.style.width = `${percent}%`;
-                    lPercent.innerText = percent;
-
-                    const elapsed = Date.now() - startTime;
-                    const rate = processed / elapsed;
-                    const remaining = (entries.length - processed) / rate;
-                    lETA.innerText = `ETA: ${Math.round(remaining / 1000)}s`;
+                    pBar.style.width = `${Math.round((processed / entries.length) * 100)}%`;
+                    lPercent.innerText = Math.round((processed / entries.length) * 100);
                 }
 
-                lText.innerText = 'Consolidating duplicate entries...';
+                // CONSOLIDATION
                 const consolidatedMap = {};
-                
                 tempLibrary.forEach(item => {
-                    const finalKey = `${item.title_en}|${item.db_season}`; 
-
-                    if (consolidatedMap[finalKey]) {
-                        consolidatedMap[finalKey].local_files += item.local_files;
-                        consolidatedMap[finalKey].dates = consolidatedMap[finalKey].dates.concat(item.dates);
-                        if (item.first_seen < consolidatedMap[finalKey].first_seen) {
-                            consolidatedMap[finalKey].first_seen = item.first_seen;
-                        }
+                    const key = `${item.title_en}_${item.db_season_disp}`;
+                    if (consolidatedMap[key]) {
+                        consolidatedMap[key].local_files += item.local_files;
+                        consolidatedMap[key].dates = consolidatedMap[key].dates.concat(item.dates);
+                        if (item.first_seen < consolidatedMap[key].first_seen) consolidatedMap[key].first_seen = item.first_seen;
                     } else {
-                        consolidatedMap[finalKey] = item;
+                        consolidatedMap[key] = item;
                     }
                 });
-
                 library = Object.values(consolidatedMap);
 
+                // --- UI DISPLAY ---
                 document.getElementById('loading').classList.add('hidden');
                 document.getElementById('dashboard').classList.remove('hidden');
                 
@@ -784,431 +757,220 @@
                 document.getElementById('uniqueTitles').innerText = library.length;
                 document.getElementById('totalFiles').innerText = library.reduce((acc, cur) => acc + cur.local_files, 0);
 
-                const totalMinutes = library.reduce((acc, item) => acc + ((item.episodes || 12) * 24), 0);
-                const wastedDays = Math.floor(totalMinutes / (24 * 60));
-                const remainingMinsTotal = totalMinutes % (24 * 60);
-                const wastedHours = Math.floor(remainingMinsTotal / 60);
-                const wastedMinutes = remainingMinsTotal % 60;
+                // --- RESTORED: TOP PERFORMERS LOGIC ---
                 
-                document.getElementById('timeWasted').innerText = `${wastedDays}j ${wastedHours}h ${wastedMinutes}m`;
-
-                const allStudios = new Set();
-                library.forEach(i => i.studios.forEach(s => allStudios.add(s)));
-
-                const validScores = library.filter(i => i.score);
-                const avgScore = validScores.length ? (validScores.reduce((sum, i) => sum + i.score, 0) / validScores.length).toFixed(1) : "N/A";
-                document.getElementById('avgScore').innerText = avgScore;
-
-                const allGenres = new Set();
-                library.forEach(i => i.genres.forEach(g => allGenres.add(g)));
-                document.getElementById('totalGenres').innerText = allGenres.size;
-
-                const allDates = new Set();
-                library.forEach(i => i.dates.forEach(d => allDates.add(d.date)));
-                const activeDaysEl = document.getElementById('activeDays');
-                if(activeDaysEl) activeDaysEl.innerText = allDates.size;
-
-                const timestamps = library.flatMap(i => i.dates.map(d => i.timestamp));
-                if (timestamps.length > 0) {
-                    const minTs = Math.min(...timestamps);
-                    const maxTs = Math.max(...timestamps);
-                    const ageSpan = Math.floor((maxTs - minTs) / 86400);
-                    const ageSpanEl = document.getElementById('ageSpan');
-                    if(ageSpanEl) ageSpanEl.innerText = `${ageSpan}j`;
-                }
-
-                const withYear = library.filter(i => i.year);
-                const oldest = [...withYear].sort((a, b) => (a.year || 9999) - (b.year || 9999))[0];
-                const newest = [...withYear].sort((a, b) => (b.year || 0) - (a.year || 0))[0];
-
-                if (oldest) {
-                    document.getElementById('oldestTitle').innerText = oldest.title_en;
-                    document.getElementById('oldestYear').innerText = `Année: ${oldest.year}`;
-                    document.getElementById('oldestStudio').innerText = `Studio: ${oldest.studios[0] || 'Unknown'}`;
-                    document.getElementById('oldestImage').src = oldest.image || DEFAULT_IMG;
-                }
-
-                if (newest) {
-                    document.getElementById('newestTitle').innerText = newest.title_en;
-                    document.getElementById('newestYear').innerText = `Année: ${newest.year}`;
-                    document.getElementById('newestStudio').innerText = `Studio: ${newest.studios[0] || 'Unknown'}`;
-                    document.getElementById('newestImage').src = newest.image || DEFAULT_IMG;
-                }
-
+                // 1. Top Title (Most Files)
                 const topFileTitle = [...library].sort((a, b) => b.local_files - a.local_files)[0];
-                document.getElementById('topTitle').innerText = topFileTitle ? topFileTitle.title_en : '-';
-                document.getElementById('topTitleCount').innerText = topFileTitle ? `${topFileTitle.local_files} fichiers` : '';
+                if (topFileTitle) {
+                    document.getElementById('topTitle').innerText = topFileTitle.title_en;
+                    document.getElementById('topTitleCount').innerText = `${topFileTitle.local_files} fichiers`;
+                }
 
+                // 2. Top Studio (Most Series)
                 const studioStats = {};
                 library.forEach(i => {
-                    i.studios.forEach(s => {
-                        if (!studioStats[s]) studioStats[s] = { count: 0, files: 0 };
-                        studioStats[s].count++;
-                        studioStats[s].files += i.local_files;
-                    });
+                    if (i.studios && i.studios.length > 0) {
+                        i.studios.forEach(s => {
+                            if (!studioStats[s]) studioStats[s] = 0;
+                            studioStats[s]++;
+                        });
+                    }
                 });
-                const topStudio = Object.entries(studioStats).sort((a, b) => b[1].count - a[1].count)[0];
-                document.getElementById('topStudio').innerText = topStudio ? topStudio[0] : '-';
-                document.getElementById('topStudioCount').innerText = topStudio ? `${topStudio[1].count} séries` : '';
+                const topStudioEntry = Object.entries(studioStats).sort((a, b) => b[1] - a[1])[0];
+                if (topStudioEntry) {
+                    document.getElementById('topStudio').innerText = topStudioEntry[0];
+                    document.getElementById('topStudioCount').innerText = `${topStudioEntry[1]} séries`;
+                }
 
+                // 3. Top Genre (Most Titles)
                 const genreStats = {};
                 library.forEach(i => {
-                    i.genres.forEach(g => {
-                        genreStats[g] = (genreStats[g] || 0) + 1;
-                    });
+                    if (i.genres && i.genres.length > 0) {
+                        i.genres.forEach(g => {
+                            genreStats[g] = (genreStats[g] || 0) + 1;
+                        });
+                    }
                 });
                 const topGenreEntry = Object.entries(genreStats).sort((a, b) => b[1] - a[1])[0];
-                document.getElementById('topGenre').innerText = topGenreEntry ? topGenreEntry[0] : '-';
-                document.getElementById('topGenreCount').innerText = topGenreEntry ? `${topGenreEntry[1]} titres` : '';
+                if (topGenreEntry) {
+                    document.getElementById('topGenre').innerText = topGenreEntry[0];
+                    document.getElementById('topGenreCount').innerText = `${topGenreEntry[1]} titres`;
+                }
+                // --------------------------------------
 
-                // CHARTS
-                const decades = {};
-                library.forEach(i => {
-                    if (i.year) {
-                        const decade = Math.floor(i.year / 10) * 10;
-                        decades[decade] = (decades[decade] || 0) + 1;
-                    }
-                });
-                if (chartInstances.decadeChart) chartInstances.decadeChart.destroy();
-                chartInstances.decadeChart = new Chart(document.getElementById('decadeChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: Object.keys(decades).sort().map(d => `${d}s`),
-                        datasets: [{
-                            label: 'Titres',
-                            data: Object.keys(decades).sort().map(d => decades[d]),
-                            backgroundColor: '#8b5cf6',
-                            borderRadius: 6
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } }
-                    }
-                });
+                // Time Wasted
+                const totalMinutes = library.reduce((acc, item) => acc + (item.episodes * 24), 0);
+                const d = Math.floor(totalMinutes / 1440);
+                const h = Math.floor((totalMinutes % 1440) / 60);
+                document.getElementById('timeWasted').innerText = `${d}j ${h}h`;
 
-                const years = {};
-                library.forEach(i => {
-                    if (i.year) years[i.year] = (years[i.year] || 0) + 1;
-                });
-                const sortedYears = Object.keys(years).sort().slice(-10);
-                if (chartInstances.yearlyChart) chartInstances.yearlyChart.destroy();
-                chartInstances.yearlyChart = new Chart(document.getElementById('yearlyChart'), {
-                    type: 'line',
-                    data: {
-                        labels: sortedYears,
-                        datasets: [{
-                            label: 'Titres',
-                            data: sortedYears.map(y => years[y]),
-                            borderColor: '#f59e0b',
-                            backgroundColor: 'rgba(245, 158, 11, 0.1)',
-                            fill: true,
-                            tension: 0.4
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } }
-                    }
-                });
+                // Avg Score
+                const scores = library.filter(i => i.score > 0);
+                const avg = scores.length ? (scores.reduce((a, b) => a + b.score, 0) / scores.length).toFixed(2) : "0.0";
+                document.getElementById('avgScore').innerText = avg;
 
-                const topDownloads = [...library].sort((a, b) => b.local_files - a.local_files).slice(0, 10);
-                if (chartInstances.topDownloadsChart) chartInstances.topDownloadsChart.destroy();
-                chartInstances.topDownloadsChart = new Chart(document.getElementById('topDownloadsChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: topDownloads.map(d => d.title_en.substring(0, 25) + (d.title_en.length > 25 ? '...' : '')),
-                        datasets: [{
-                            label: 'Fichiers',
-                            data: topDownloads.map(d => d.local_files),
-                            backgroundColor: '#8b5cf6',
-                            borderRadius: 6
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } }
-                    }
-                });
-
-                const dailyMap = {};
+                // Active Days / Age
+                const allDates = new Set();
+                let minTs = Infinity, maxTs = 0;
                 library.forEach(i => {
                     i.dates.forEach(d => {
-                        dailyMap[d.date] = (dailyMap[d.date] || 0) + 1;
+                        allDates.add(d.date);
+                        if(d.timestamp < minTs) minTs = d.timestamp;
+                        if(d.timestamp > maxTs) maxTs = d.timestamp;
                     });
                 });
-                const sortedDates = Object.keys(dailyMap).sort().slice(-30);
-                if (chartInstances.dailyActivityChart) chartInstances.dailyActivityChart.destroy();
-                chartInstances.dailyActivityChart = new Chart(document.getElementById('dailyActivityChart'), {
-                    type: 'line',
-                    data: {
-                        labels: sortedDates,
-                        datasets: [{
-                            label: 'Fichiers ajoutés',
-                            data: sortedDates.map(d => dailyMap[d]),
-                            borderColor: '#10b981',
-                            backgroundColor: 'rgba(16, 185, 129, 0.1)',
-                            fill: true,
-                            tension: 0.4
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } }
-                    }
-                });
+                document.getElementById('activeDays').innerText = allDates.size;
+                document.getElementById('ageSpan').innerText = (maxTs > 0 && minTs < Infinity) ? `${Math.floor((maxTs - minTs) / 86400)}j` : "0j";
 
-                const hourlyMap = {};
-                library.forEach(i => {
-                    i.dates.forEach(d => {
-                        const h = new Date(d.timestamp * 1000).getHours();
-                        hourlyMap[h] = (hourlyMap[h] || 0) + 1;
-                    });
-                });
-                const hoursLabels = Array.from({ length: 24 }, (_, i) => i);
-                if (chartInstances.hourlyChart) chartInstances.hourlyChart.destroy();
-                chartInstances.hourlyChart = new Chart(document.getElementById('hourlyChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: hoursLabels.map(h => `${h}h`),
-                        datasets: [{
-                            label: 'Activité',
-                            data: hoursLabels.map(h => hourlyMap[h] || 0),
-                            backgroundColor: '#06b6d4',
-                            borderRadius: 4
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } }
-                    }
-                });
+                // Total Genres
+                document.getElementById('totalGenres').innerText = Object.keys(genreStats).length;
 
-                const topStudiosVol = Object.entries(studioStats).sort((a, b) => b[1].files - a[1].files).slice(0, 10);
-                if (chartInstances.studioVolumeChart) chartInstances.studioVolumeChart.destroy();
-                chartInstances.studioVolumeChart = new Chart(document.getElementById('studioVolumeChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: topStudiosVol.map(s => s[0]),
-                        datasets: [{
-                            label: 'Volume',
-                            data: topStudiosVol.map(s => s[1].files),
-                            backgroundColor: '#06b6d4',
-                            borderRadius: 4
-                        }]
-                    },
-                    options: {
-                        indexAxis: 'y',
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { x: { grid: { color: '#1e293b' } }, y: { grid: { display: false } } }
-                    }
-                });
+                // Oldest/Newest
+                const withYear = library.filter(i => i.year && i.year > 1900);
+                if (withYear.length > 0) {
+                    const oldest = [...withYear].sort((a, b) => a.year - b.year)[0];
+                    const newest = [...withYear].sort((a, b) => b.year - a.year)[0];
+                    
+                    if(oldest) updateHeroCard('oldest', oldest);
+                    if(newest) updateHeroCard('newest', newest);
+                }
 
-                const demos = {};
-                library.forEach(i => {
-                    if (i.demographics && i.demographics.length > 0) {
-                        i.demographics.forEach(d => demos[d] = (demos[d] || 0) + 1);
-                    } else {
-                        demos['Inconnu'] = (demos['Inconnu'] || 0) + 1;
-                    }
-                });
-                if (chartInstances.demographicsChart) chartInstances.demographicsChart.destroy();
-                chartInstances.demographicsChart = new Chart(document.getElementById('demographicsChart'), {
-                    type: 'pie',
-                    data: {
-                        labels: Object.keys(demos),
-                        datasets: [{
-                            data: Object.values(demos),
-                            backgroundColor: ['#ef4444', '#3b82f6', '#ec4899', '#f59e0b', '#64748b'],
-                            borderWidth: 0
-                        }]
-                    },
-                    options: { maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10 } } } }
-                });
-
-                const sources = {};
-                library.forEach(i => sources[i.source || 'Unknown'] = (sources[i.source || 'Unknown'] || 0) + 1);
-                let cleanSources = { 'Manga': 0, 'Original': 0, 'Light Novel': 0, 'Autre': 0 };
-                Object.entries(sources).forEach(([k, v]) => {
-                    if (cleanSources[k] !== undefined) cleanSources[k] += v;
-                    else cleanSources['Autre'] += v;
-                });
-                if (chartInstances.sourceChart) chartInstances.sourceChart.destroy();
-                chartInstances.sourceChart = new Chart(document.getElementById('sourceChart'), {
-                    type: 'doughnut',
-                    data: {
-                        labels: Object.keys(cleanSources),
-                        datasets: [{
-                            data: Object.values(cleanSources),
-                            backgroundColor: ['#f59e0b', '#10b981', '#6366f1', '#475569'],
-                            borderWidth: 0
-                        }]
-                    },
-                    options: { maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10 } } } }
-                });
-
-                const topGenres = Object.entries(genreStats).sort((a, b) => b[1] - a[1]).slice(0, 7);
-                if (chartInstances.genrePolarChart) chartInstances.genrePolarChart.destroy();
-                chartInstances.genrePolarChart = new Chart(document.getElementById('genrePolarChart'), {
-                    type: 'radar',
-                    data: {
-                        labels: topGenres.map(g => g[0]),
-                        datasets: [{
-                            label: 'Densité',
-                            data: topGenres.map(g => g[1]),
-                            backgroundColor: 'rgba(139, 92, 246, 0.2)',
-                            borderColor: '#8b5cf6',
-                            pointBackgroundColor: '#fff',
-                            pointBorderColor: '#8b5cf6',
-                            borderWidth: 2,
-                            fill: true
-                        }]
-                    },
-                    options: {
-                        maintainAspectRatio: false,
-                        scales: {
-                            r: {
-                                grid: { color: 'rgba(255,255,255,0.1)' },
-                                angleLines: { color: 'rgba(255,255,255,0.1)' },
-                                ticks: { display: false, backdropColor: 'transparent' },
-                                pointLabels: { color: '#e2e8f0', font: { size: 12, family: "'Inter', sans-serif" } }
-                            }
-                        },
-                        plugins: { legend: { display: false } }
-                    }
-                });
-
-                const genreFiles = {};
-                library.forEach(i => {
-                    i.genres.forEach(g => {
-                        genreFiles[g] = (genreFiles[g] || 0) + i.local_files;
-                    });
-                });
-                const topGenreFiles = Object.entries(genreFiles).sort((a, b) => b[1] - a[1]).slice(0, 10);
-                if (chartInstances.genreFilesChart) chartInstances.genreFilesChart.destroy();
-                chartInstances.genreFilesChart = new Chart(document.getElementById('genreFilesChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: topGenreFiles.map(g => g[0]),
-                        datasets: [{
-                            label: 'Fichiers',
-                            data: topGenreFiles.map(g => g[1]),
-                            backgroundColor: '#ec4899',
-                            borderRadius: 4
-                        }]
-                    },
-                    options: {
-                        indexAxis: 'y',
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { x: { grid: { color: '#1e293b' } }, y: { grid: { display: false } } }
-                    }
-                });
-
-                const scoreRanges = { '0-4': 0, '4-5': 0, '5-6': 0, '6-7': 0, '7-8': 0, '8-9': 0, '9-10': 0 };
-                library.forEach(i => {
-                    const s = i.score || 0;
-                    if (s < 4) scoreRanges['0-4']++;
-                    else if (s < 5) scoreRanges['4-5']++;
-                    else if (s < 6) scoreRanges['5-6']++;
-                    else if (s < 7) scoreRanges['6-7']++;
-                    else if (s < 8) scoreRanges['7-8']++;
-                    else if (s < 9) scoreRanges['8-9']++;
-                    else scoreRanges['9-10']++;
-                });
-                if (chartInstances.scoreDistChart) chartInstances.scoreDistChart.destroy();
-                chartInstances.scoreDistChart = new Chart(document.getElementById('scoreDistChart'), {
-                    type: 'bar',
-                    data: {
-                        labels: Object.keys(scoreRanges),
-                        datasets: [{
-                            label: 'Titres',
-                            data: Object.values(scoreRanges),
-                            backgroundColor: '#fbbf24',
-                            borderRadius: 4
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
-                        scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } }
-                    }
-                });
-
-                const scatterData = library.map(i => ({ x: i.local_files, y: i.score || 0, title: i.title_en }));
-                if (chartInstances.scatterChart) chartInstances.scatterChart.destroy();
-                chartInstances.scatterChart = new Chart(document.getElementById('scatterChart'), {
-                    type: 'scatter',
-                    data: {
-                        datasets: [{
-                            label: 'Titres',
-                            data: scatterData,
-                            backgroundColor: 'rgba(139, 92, 246, 0.7)',
-                            borderColor: '#8b5cf6',
-                            borderWidth: 1,
-                            pointRadius: 6, // Points plus gros
-                            pointHoverRadius: 9
-                        }]
-                    },
-                    options: {
-                        responsive: true,
-                        maintainAspectRatio: false,
-                        plugins: { 
-                            legend: { display: false },
-                            tooltip: {
-                                callbacks: {
-                                    label: function(context) {
-                                        const item = context.raw;
-                                        return `${item.title} (${item.y}★ | ${item.x} fichiers)`;
-                                    }
-                                }
-                            }
-                        },
-                        scales: {
-                            x: { 
-                                title: { display: true, text: 'Volume de Fichiers', color: '#94a3b8' }, 
-                                grid: { color: '#334155' },
-                                ticks: { color: '#cbd5e1' }
-                            },
-                            y: { 
-                                title: { display: true, text: 'Note Moyenne', color: '#94a3b8' }, 
-                                grid: { color: '#334155' },
-                                ticks: { color: '#cbd5e1' }
-                            }
-                        }
-                    }
-                });
-
+                renderCharts();
                 renderTable('files');
+
             } catch (e) {
-                console.error('Error initializing dashboard:', e);
-                document.getElementById('loadingText').innerHTML = '<span class="text-red-500">System Error. Check console.</span>';
-                document.getElementById('progressBar').classList.add('bg-red-500');
+                console.error('Error:', e);
+                document.getElementById('loadingText').innerHTML = 'System Error. Check console.';
             }
+        }
+
+        function updateHeroCard(prefix, item) {
+            document.getElementById(`${prefix}Title`).innerText = item.title_en;
+            document.getElementById(`${prefix}Year`).innerText = `Année: ${item.year}`;
+            document.getElementById(`${prefix}Studio`).innerText = `Studio: ${item.studios?.[0] || '-'}`;
+            document.getElementById(`${prefix}Image`).src = item.image || DEFAULT_IMG;
+        }
+
+        function renderCharts() {
+            // Decades
+            const decades = {};
+            library.forEach(i => { if (i.year) { const d = Math.floor(i.year / 10) * 10; decades[d] = (decades[d] || 0) + 1; }});
+            new Chart(document.getElementById('decadeChart'), {
+                type: 'bar',
+                data: { labels: Object.keys(decades).sort().map(d => `${d}s`), datasets: [{ label: 'Titres', data: Object.keys(decades).sort().map(d => decades[d]), backgroundColor: '#8b5cf6', borderRadius: 6 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } } }
+            });
+
+            // Yearly
+            const years = {};
+            library.forEach(i => { if (i.year) years[i.year] = (years[i.year] || 0) + 1; });
+            const sortedYears = Object.keys(years).sort().slice(-10);
+            new Chart(document.getElementById('yearlyChart'), {
+                type: 'line',
+                data: { labels: sortedYears, datasets: [{ label: 'Titres', data: sortedYears.map(y => years[y]), borderColor: '#f59e0b', backgroundColor: 'rgba(245, 158, 11, 0.1)', fill: true, tension: 0.4 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } } }
+            });
+
+            // Top Downloads
+            const topDownloads = [...library].sort((a, b) => b.local_files - a.local_files).slice(0, 10);
+            new Chart(document.getElementById('topDownloadsChart'), {
+                type: 'bar',
+                data: { labels: topDownloads.map(d => d.title_en.substring(0, 20) + (d.title_en.length>20?'...':'')), datasets: [{ label: 'Fichiers', data: topDownloads.map(d => d.local_files), backgroundColor: '#8b5cf6', borderRadius: 6 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } } }
+            });
+
+            // Daily Activity
+            const dailyMap = {};
+            library.forEach(i => i.dates.forEach(d => dailyMap[d.date] = (dailyMap[d.date] || 0) + 1));
+            const sortedDates = Object.keys(dailyMap).sort().slice(-30);
+            new Chart(document.getElementById('dailyActivityChart'), {
+                type: 'line',
+                data: { labels: sortedDates, datasets: [{ label: 'Ajouts', data: sortedDates.map(d => dailyMap[d]), borderColor: '#10b981', backgroundColor: 'rgba(16, 185, 129, 0.1)', fill: true, tension: 0.4 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } } }
+            });
+
+            // Hourly
+            const hourlyMap = {};
+            library.forEach(i => i.dates.forEach(d => { const h = new Date(d.timestamp * 1000).getHours(); hourlyMap[h] = (hourlyMap[h] || 0) + 1; }));
+            const hoursLabels = Array.from({ length: 24 }, (_, i) => i);
+            new Chart(document.getElementById('hourlyChart'), {
+                type: 'bar',
+                data: { labels: hoursLabels.map(h => `${h}h`), datasets: [{ label: 'Activité', data: hoursLabels.map(h => hourlyMap[h] || 0), backgroundColor: '#06b6d4', borderRadius: 4 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } } }
+            });
+
+            // Studios
+            const studioStats = {};
+            library.forEach(i => i.studios.forEach(s => { if (!studioStats[s]) studioStats[s] = 0; studioStats[s] += i.local_files; }));
+            const topStudiosVol = Object.entries(studioStats).sort((a, b) => b[1] - a[1]).slice(0, 10);
+            new Chart(document.getElementById('studioVolumeChart'), {
+                type: 'bar',
+                data: { labels: topStudiosVol.map(s => s[0]), datasets: [{ label: 'Volume', data: topStudiosVol.map(s => s[1]), backgroundColor: '#06b6d4', borderRadius: 4 }] },
+                options: { indexAxis: 'y', maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#1e293b' } }, y: { grid: { display: false } } } }
+            });
+
+            // Demographics
+            const demos = {};
+            library.forEach(i => { if (i.demographics.length > 0) i.demographics.forEach(d => demos[d] = (demos[d] || 0) + 1); else demos['Inconnu'] = (demos['Inconnu'] || 0) + 1; });
+            new Chart(document.getElementById('demographicsChart'), {
+                type: 'pie',
+                data: { labels: Object.keys(demos), datasets: [{ data: Object.values(demos), backgroundColor: ['#ef4444', '#3b82f6', '#ec4899', '#f59e0b', '#64748b'], borderWidth: 0 }] },
+                options: { maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10 } } } }
+            });
+
+            // Source
+            const sources = {};
+            library.forEach(i => sources[i.source || 'Unknown'] = (sources[i.source || 'Unknown'] || 0) + 1);
+            let cleanSources = { 'Manga': 0, 'Original': 0, 'Light Novel': 0, 'Autre': 0 };
+            Object.entries(sources).forEach(([k, v]) => { if (cleanSources[k] !== undefined) cleanSources[k] += v; else cleanSources['Autre'] += v; });
+            new Chart(document.getElementById('sourceChart'), {
+                type: 'doughnut',
+                data: { labels: Object.keys(cleanSources), datasets: [{ data: Object.values(cleanSources), backgroundColor: ['#f59e0b', '#10b981', '#6366f1', '#475569'], borderWidth: 0 }] },
+                options: { maintainAspectRatio: false, plugins: { legend: { position: 'right', labels: { boxWidth: 10 } } } }
+            });
+
+            // Genre Radar
+            const genreStats = {};
+            library.forEach(i => i.genres.forEach(g => genreStats[g] = (genreStats[g] || 0) + 1));
+            const topGenres = Object.entries(genreStats).sort((a, b) => b[1] - a[1]).slice(0, 7);
+            new Chart(document.getElementById('genrePolarChart'), {
+                type: 'radar',
+                data: { labels: topGenres.map(g => g[0]), datasets: [{ label: 'Densité', data: topGenres.map(g => g[1]), backgroundColor: 'rgba(139, 92, 246, 0.2)', borderColor: '#8b5cf6', pointBackgroundColor: '#fff', pointBorderColor: '#8b5cf6', borderWidth: 2, fill: true }] },
+                options: { maintainAspectRatio: false, scales: { r: { grid: { color: 'rgba(255,255,255,0.1)' }, angleLines: { color: 'rgba(255,255,255,0.1)' }, ticks: { display: false, backdropColor: 'transparent' }, pointLabels: { color: '#e2e8f0', font: { size: 12 } } } }, plugins: { legend: { display: false } } }
+            });
+
+            // Genre Files
+            const genreFiles = {};
+            library.forEach(i => i.genres.forEach(g => genreFiles[g] = (genreFiles[g] || 0) + i.local_files));
+            const topGenreFiles = Object.entries(genreFiles).sort((a, b) => b[1] - a[1]).slice(0, 10);
+            new Chart(document.getElementById('genreFilesChart'), {
+                type: 'bar',
+                data: { labels: topGenreFiles.map(g => g[0]), datasets: [{ label: 'Fichiers', data: topGenreFiles.map(g => g[1]), backgroundColor: '#ec4899', borderRadius: 4 }] },
+                options: { indexAxis: 'y', maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { x: { grid: { color: '#1e293b' } }, y: { grid: { display: false } } } }
+            });
+
+            // Score Dist
+            const scoreRanges = { '0-4': 0, '4-5': 0, '5-6': 0, '6-7': 0, '7-8': 0, '8-9': 0, '9-10': 0 };
+            library.forEach(i => { const s = i.score || 0; if (s < 4) scoreRanges['0-4']++; else if (s < 5) scoreRanges['4-5']++; else if (s < 6) scoreRanges['5-6']++; else if (s < 7) scoreRanges['6-7']++; else if (s < 8) scoreRanges['7-8']++; else if (s < 9) scoreRanges['8-9']++; else scoreRanges['9-10']++; });
+            new Chart(document.getElementById('scoreDistChart'), {
+                type: 'bar',
+                data: { labels: Object.keys(scoreRanges), datasets: [{ label: 'Titres', data: Object.values(scoreRanges), backgroundColor: '#fbbf24', borderRadius: 4 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false } }, scales: { y: { beginAtZero: true, grid: { color: '#1e293b' } }, x: { grid: { display: false } } } }
+            });
+
+            // Scatter
+            new Chart(document.getElementById('scatterChart'), {
+                type: 'scatter',
+                data: { datasets: [{ label: 'Titres', data: library.map(i => ({ x: i.local_files, y: i.score || 0, title: i.title_en })), backgroundColor: 'rgba(139, 92, 246, 0.7)', borderColor: '#8b5cf6', borderWidth: 1, pointRadius: 6, pointHoverRadius: 9 }] },
+                options: { responsive: true, maintainAspectRatio: false, plugins: { legend: { display: false }, tooltip: { callbacks: { label: function(context) { const item = context.raw; return `${item.title} (${item.y}★ | ${item.x} fichiers)`; } } } }, scales: { x: { title: { display: true, text: 'Volume', color: '#94a3b8' }, grid: { color: '#334155' } }, y: { title: { display: true, text: 'Note', color: '#94a3b8' }, grid: { color: '#334155' } } } }
+            });
         }
 
         function renderTable(sortBy = 'files') {
             let sorted = [...library];
-
-            if (sortBy === 'files') {
-                sorted.sort((a, b) => b.local_files - a.local_files);
-            } else if (sortBy === 'score') {
-                sorted.sort((a, b) => (b.score || 0) - (a.score || 0));
-            } else if (sortBy === 'year') {
-                sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
-            }
+            if (sortBy === 'files') sorted.sort((a, b) => b.local_files - a.local_files);
+            else if (sortBy === 'score') sorted.sort((a, b) => (b.score || 0) - (a.score || 0));
+            else if (sortBy === 'year') sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
 
             const tbody = document.getElementById('leaderboardBody'); 
             tbody.innerHTML = ''; 
@@ -1216,48 +978,24 @@
             sorted.forEach((item, index) => {
                 const row = tbody.insertRow();
                 row.className = 'border-b border-surface/50 hover:bg-surface/50 transition duration-150';
-
-                // Rang
-                let rankCell = row.insertCell();
-                rankCell.className = 'px-6 py-4 text-center font-bold text-lg';
-                rankCell.innerHTML = `<span class="${index < 3 ? 'text-gold' : 'text-gray-400'}">#${index + 1}</span>`;
-
-                // Titre
-                let titleCell = row.insertCell();
-                titleCell.className = 'px-6 py-4 font-medium text-white flex items-center space-x-3';
-                titleCell.innerHTML = `
-                    <div class="h-10 w-10 flex-shrink-0 overflow-hidden rounded-md">
-                        <img src="${item.image || DEFAULT_IMG}" class="w-full h-full object-cover" onerror="this.src='${DEFAULT_IMG}'">
-                    </div>
-                    <div>
-                        <a href="${item.url}" target="_blank" class="text-white font-medium truncate max-w-[250px] hover:text-primary transition hover:underline">${item.title_en}</a>
-                        <p class="text-xs text-gray-400">Saison: ${item.db_season}</p>
-                    </div>
+                
+                row.innerHTML = `
+                    <td class="px-6 py-4 text-center font-bold text-lg"><span class="${index < 3 ? 'text-gold' : 'text-gray-400'}">#${index + 1}</span></td>
+                    <td class="px-6 py-4 font-medium text-white flex items-center space-x-3">
+                        <div class="h-10 w-10 flex-shrink-0 overflow-hidden rounded-md bg-gray-700">
+                            <img src="${item.image}" class="w-full h-full object-cover">
+                        </div>
+                        <div>
+                            <a href="${item.url}" target="_blank" class="text-white font-medium truncate max-w-[250px] hover:text-primary transition hover:underline">${item.title_en}</a>
+                            <p class="text-xs text-gray-400">${item.db_season_disp}</p>
+                        </div>
+                    </td>
+                    <td class="px-6 py-4 text-xs text-gray-400">${item.year || '-'}</td>
+                    <td class="px-6 py-4 text-xs text-accent">${item.studios?.[0] || '-'}</td>
+                    <td class="px-6 py-4 text-xs text-gray-400">${item.genres?.slice(0, 2).join(', ') || '-'}</td>
+                    <td class="px-6 py-4 text-right font-mono text-gray-300">${item.local_files}</td>
+                    <td class="px-6 py-4 text-center font-bold"><span class="${item.score ? 'text-gold' : 'text-gray-600'}">${item.score ? item.score.toFixed(2) : '-'}</span></td>
                 `;
-                // Année
-                let yearCell = row.insertCell();
-                yearCell.className = 'px-6 py-4 text-xs text-gray-400';
-                yearCell.innerText = item.year || '-';
-
-                // Studio
-                let studioCell = row.insertCell();
-                studioCell.className = 'px-6 py-4 text-xs text-accent';
-                studioCell.innerText = item.studios[0] || '-';
-
-                // Genre
-                let genreCell = row.insertCell();
-                genreCell.className = 'px-6 py-4 text-xs text-gray-400';
-                genreCell.innerText = item.genres.slice(0, 2).join(', ') || '-';
-
-                // Fichiers
-                let filesCell = row.insertCell();
-                filesCell.className = 'px-6 py-4 text-right font-mono text-gray-300';
-                filesCell.innerText = item.local_files;
-
-                // Note
-                let scoreCell = row.insertCell();
-                scoreCell.className = 'px-6 py-4 text-center font-bold';
-                scoreCell.innerHTML = item.score ? `<span class="text-gold">${item.score.toFixed(2)}</span>` : '<span class="text-red-400">N/A</span>';
             });
         }
 
