@@ -488,7 +488,7 @@
         </div>
     </main>
 
-    <!-- FOOTER WITH CREDITS -->
+    <!-- FOOTER -->
     <footer class="text-center text-gray-500 text-xs py-8 border-t border-gray-800/50 mt-12 bg-darker/50">
         <div class="space-y-2">
             <p>
@@ -516,9 +516,56 @@
         let rawData = [];
         let chartInstances = {};
 
+        // Image par défaut (Gris propre)
+        const DEFAULT_IMG = "data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22%3E%3Crect fill=%22%231e293b%22 width=%2240%22 height=%2240%22/%3E%3Ctext x=%2250%25%22 y=%2250%25%22 dominant-baseline=%22middle%22 text-anchor=%22middle%22 fill=%22%23475569%22 font-size=%2210%22 font-family=%22sans-serif%22%3E?%3C/text%3E%3C/svg%3E";
+
         const sleep = ms => new Promise(r => setTimeout(r, ms));
 
-        async function smartFetchMetadata(title, dbSeason) {
+        function hardReset() {
+            if (confirm("⚠️ Effacer tout le cache local et recharger ?")) {
+                localStorage.clear();
+                location.reload();
+            }
+        }
+
+        function parseSeason(val) {
+            if (typeof val === 'number') return val;
+            if (!val) return 1;
+            const str = String(val).toLowerCase();
+            if (str.includes('film') || str.includes('movie') || str.includes('oav')) return 1; 
+            const match = str.match(/\d+/);
+            return match ? parseInt(match[0]) : 1;
+        }
+
+        // Vérifie si le titre trouvé par l'API ressemble vraiment à ce qu'on cherche
+        function checkSimilarity(searchQuery, apiResult) {
+            // Nettoyage : minuscules, suppression symboles, découpage en mots
+            const normalize = (str) => str.toLowerCase().replace(/[^a-z0-9\s]/g, '').split(/\s+/).filter(w => w.length > 2);
+            
+            const searchWords = normalize(searchQuery);
+            const titleEn = normalize(apiResult.title_english || "");
+            const titleJp = normalize(apiResult.title || "");
+            
+            // Si la recherche est trop courte (ex: "K"), on est permissif
+            if(searchWords.length === 0) return true;
+
+            // On vérifie combien de mots de notre recherche sont présents dans le résultat
+            const checkMatch = (targetWords) => {
+                let matches = 0;
+                searchWords.forEach(w => { if (targetWords.includes(w)) matches++; });
+                return matches;
+            };
+
+            const matchesEn = checkMatch(titleEn);
+            const matchesJp = checkMatch(titleJp);
+
+            // Si au moins 50% des mots clés correspondent, on accepte
+            const threshold = searchWords.length * 0.5;
+            return Math.max(matchesEn, matchesJp) >= threshold;
+        }
+
+        async function smartFetchMetadata(title, dbSeasonRaw) { 
+            // 1. Nettoyage du titre pour la recherche API
             let cleanTitle = title
                 .replace(/\[.*?\]/g, '')
                 .replace(/\(.*?\)/g, '')
@@ -529,53 +576,74 @@
                 .replace(/_/g, ' ')
                 .trim();
 
-            const cacheKey = `trends_v9_${cleanTitle.toLowerCase()}_s${dbSeason}`;
+            const cacheKey = `trends_v18_${cleanTitle.toLowerCase()}_s${dbSeasonRaw}`; 
             const cached = localStorage.getItem(cacheKey);
 
             if (cached) {
                 const el = document.getElementById('loadingCache');
-                if (el) el.innerText = parseInt(el.innerText || 0) + 1;
+                if(el) el.innerText = parseInt(el.innerText || 0) + 1;
                 return JSON.parse(cached);
             }
+
+            const dbSeasonNum = parseSeason(dbSeasonRaw);
+            const isRemakeMarker = isNaN(parseInt(dbSeasonRaw)) || String(dbSeasonRaw).toLowerCase().includes('remake'); 
 
             try {
                 await sleep(400 + Math.random() * 200);
                 const el = document.getElementById('loadingCalls');
-                if (el) el.innerText = parseInt(el.innerText || 0) + 1;
+                if(el) el.innerText = parseInt(el.innerText || 0) + 1;
 
-                const res = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(cleanTitle)}&limit=15`);
+                const res = await fetch(`https://api.jikan.moe/v4/anime?q=${encodeURIComponent(cleanTitle)}&limit=20`);
 
                 if (res.status === 429) {
-                    await sleep(3000);
-                    return smartFetchMetadata(title, dbSeason);
+                    await sleep(3000); 
+                    return smartFetchMetadata(title, dbSeasonRaw);
                 }
 
                 const json = await res.json();
 
                 if (json.data && json.data.length > 0) {
-                    let candidates = json.data.filter(x => x.type === 'TV');
-                    if (candidates.length === 0) candidates = json.data;
+                    // Filtrage types
+                    let candidates = json.data.filter(x => x.type === 'TV' || x.type === 'ONA' || x.type === 'OVA' || x.type === 'Movie');
+                    
+                    // --- FILTRAGE DE SÉCURITÉ ---
+                    // On ne garde que les animes dont le titre correspond vraiment
+                    candidates = candidates.filter(cand => checkSimilarity(cleanTitle, cand));
 
+                    if (candidates.length === 0 && json.data.length > 0) {
+                         // Tentative de fallback soft
+                         candidates = json.data;
+                    }
+
+                    // Tri par année
                     candidates.sort((a, b) => {
                         const yearA = a.year || (a.aired && a.aired.from ? new Date(a.aired.from).getFullYear() : 9999);
                         const yearB = b.year || (b.aired && b.aired.from ? new Date(b.aired.from).getFullYear() : 9999);
-                        return yearA - yearB;
+                        return yearA - yearB; 
                     });
 
                     let bestMatch = null;
 
-                    if (dbSeason === 1) {
-                        bestMatch = candidates[0];
+                    if (isRemakeMarker) {
+                        // Pour un remake, on veut le plus récent
+                        const newestCandidates = [...candidates].sort((a, b) => {
+                            const yearA = a.year || (a.aired && a.aired.from ? new Date(a.aired.from).getFullYear() : 0);
+                            const yearB = b.year || (b.aired && b.aired.from ? new Date(b.aired.from).getFullYear() : 0);
+                            return yearB - yearA;
+                        });
+                        bestMatch = newestCandidates[0];
                     } else {
-                        const targetIndex = dbSeason - 1;
+                        // Pour une saison normale, on prend l'index (S1 = index 0)
+                        const targetIndex = dbSeasonNum - 1; 
                         if (targetIndex < candidates.length) {
                             bestMatch = candidates[targetIndex];
                         } else {
-                            bestMatch = candidates[candidates.length - 1];
+                            bestMatch = candidates[candidates.length - 1]; 
                         }
                     }
-
-                    if (!bestMatch) bestMatch = json.data[0];
+                    
+                    // Si toujours rien, on crée un objet dummy
+                    if (!bestMatch) throw new Error("No secure match found");
 
                     let demos = bestMatch.demographics.map(d => d.name);
                     if (demos.length === 0) {
@@ -585,17 +653,19 @@
                         });
                     }
 
+                    const imgUrl = bestMatch.images?.webp?.large_image_url || bestMatch.images?.jpg?.large_image_url || DEFAULT_IMG;
+
                     const meta = {
                         title: bestMatch.title,
                         title_en: bestMatch.title_english || bestMatch.title,
-                        image: bestMatch.images.webp.large_image_url || bestMatch.images.jpg.large_image_url,
+                        image: imgUrl,
                         score: bestMatch.score,
                         studios: bestMatch.studios.map(s => s.name),
                         genres: bestMatch.genres.map(g => g.name),
                         demographics: demos,
                         source: bestMatch.source,
                         year: bestMatch.year || (bestMatch.aired && bestMatch.aired.from ? new Date(bestMatch.aired.from).getFullYear() : null),
-                        db_season: dbSeason,
+                        db_season: dbSeasonRaw, 
                         episodes: bestMatch.episodes || 12,
                         url: bestMatch.url,
                         timestamp: Date.now()
@@ -603,9 +673,22 @@
                     localStorage.setItem(cacheKey, JSON.stringify(meta));
                     return meta;
                 }
-            } catch (e) { console.warn(e); }
-
-            return { title_en: title, genres: [], studios: [], demographics: [], source: 'Unknown', score: 0, year: null, image: '', db_season: dbSeason, episodes: 12, url: '#' };
+            } catch (e) { 
+                // En cas d'erreur ou pas de correspondance, on retourne l'entrée brute
+                const fallback = { 
+                    title: title,
+                    title_en: title, 
+                    genres: [], studios: [], demographics: [], source: 'Local DB', score: 0, 
+                    year: null, 
+                    image: DEFAULT_IMG, 
+                    db_season: dbSeasonRaw, episodes: 12, url: '#' 
+                };
+                // On met en cache le fallback pour ne pas spammer l'API
+                localStorage.setItem(cacheKey, JSON.stringify(fallback));
+                return fallback;
+            }
+            
+            return { title_en: title, image: DEFAULT_IMG, db_season: dbSeasonRaw, score: 0, genres: [], studios: [], local_files: 0, dates: [] };
         }
 
         async function init() {
@@ -619,27 +702,27 @@
             try {
                 lText.innerText = 'Establishing secure connection...';
                 const res = await fetch(`/api/getStats`, { headers: { 'X-Admin-Token': TOKEN } });
-
+                
                 if (!res.ok) throw new Error("API Fetch failed");
 
                 rawData = await res.json();
 
                 lText.innerText = 'Aggregating local database...';
                 const localMap = {};
-
+                
                 rawData.forEach(row => {
                     const title = row[1];
-                    const season = row[2] || 1;
+                    const seasonRaw = row[2];
                     const ts = row[5];
-                    const uniqueKey = `${title}_S${season}`;
+                    const uniqueKey = `${title}_S${seasonRaw}`; 
 
                     if (!localMap[uniqueKey]) {
-                        localMap[uniqueKey] = {
+                        localMap[uniqueKey] = { 
                             title: title,
-                            season: season,
-                            count: 0,
-                            first_ts: ts,
-                            dates: []
+                            season_raw: seasonRaw,
+                            count: 0, 
+                            first_ts: ts, 
+                            dates: [] 
                         };
                     }
                     localMap[uniqueKey].count++;
@@ -648,14 +731,16 @@
                 });
 
                 const entries = Object.values(localMap);
-                library = [];
+                let tempLibrary = []; 
                 let processed = 0;
 
                 for (const entry of entries) {
-                    lText.innerText = `Neural processing: ${entry.title} (S${entry.season})...`;
+                    lText.innerText = `Neural processing: ${entry.title} (S${entry.season_raw})...`;
                     lTitles.innerText = processed + 1;
-                    const meta = await smartFetchMetadata(entry.title, entry.season);
-                    library.push({
+                    
+                    const meta = await smartFetchMetadata(entry.title, entry.season_raw); 
+                    
+                    tempLibrary.push({
                         ...meta,
                         local_files: entry.count,
                         dates: entry.dates,
@@ -672,21 +757,39 @@
                     lETA.innerText = `ETA: ${Math.round(remaining / 1000)}s`;
                 }
 
+                lText.innerText = 'Consolidating duplicate entries...';
+                const consolidatedMap = {};
+                
+                tempLibrary.forEach(item => {
+                    const finalKey = `${item.title_en}|${item.db_season}`; 
+
+                    if (consolidatedMap[finalKey]) {
+                        consolidatedMap[finalKey].local_files += item.local_files;
+                        consolidatedMap[finalKey].dates = consolidatedMap[finalKey].dates.concat(item.dates);
+                        if (item.first_seen < consolidatedMap[finalKey].first_seen) {
+                            consolidatedMap[finalKey].first_seen = item.first_seen;
+                        }
+                    } else {
+                        consolidatedMap[finalKey] = item;
+                    }
+                });
+
+                library = Object.values(consolidatedMap);
+
                 document.getElementById('loading').classList.add('hidden');
                 document.getElementById('dashboard').classList.remove('hidden');
-
+                
                 document.getElementById('statusText').innerText = "ONLINE";
                 document.getElementById('dataPoints').innerText = library.length;
                 document.getElementById('uniqueTitles').innerText = library.length;
                 document.getElementById('totalFiles').innerText = library.reduce((acc, cur) => acc + cur.local_files, 0);
 
-                // --- FIX: TIME WASTED CALCULATION (RENAMED VARIABLES) ---
                 const totalMinutes = library.reduce((acc, item) => acc + ((item.episodes || 12) * 24), 0);
                 const wastedDays = Math.floor(totalMinutes / (24 * 60));
                 const remainingMinsTotal = totalMinutes % (24 * 60);
                 const wastedHours = Math.floor(remainingMinsTotal / 60);
                 const wastedMinutes = remainingMinsTotal % 60;
-
+                
                 document.getElementById('timeWasted').innerText = `${wastedDays}j ${wastedHours}h ${wastedMinutes}m`;
 
                 const allStudios = new Set();
@@ -703,15 +806,15 @@
                 const allDates = new Set();
                 library.forEach(i => i.dates.forEach(d => allDates.add(d.date)));
                 const activeDaysEl = document.getElementById('activeDays');
-                if (activeDaysEl) activeDaysEl.innerText = allDates.size;
+                if(activeDaysEl) activeDaysEl.innerText = allDates.size;
 
-                const timestamps = library.flatMap(i => i.dates.map(d => d.timestamp));
+                const timestamps = library.flatMap(i => i.dates.map(d => i.timestamp));
                 if (timestamps.length > 0) {
                     const minTs = Math.min(...timestamps);
                     const maxTs = Math.max(...timestamps);
                     const ageSpan = Math.floor((maxTs - minTs) / 86400);
                     const ageSpanEl = document.getElementById('ageSpan');
-                    if (ageSpanEl) ageSpanEl.innerText = `${ageSpan}j`;
+                    if(ageSpanEl) ageSpanEl.innerText = `${ageSpan}j`;
                 }
 
                 const withYear = library.filter(i => i.year);
@@ -722,14 +825,14 @@
                     document.getElementById('oldestTitle').innerText = oldest.title_en;
                     document.getElementById('oldestYear').innerText = `Année: ${oldest.year}`;
                     document.getElementById('oldestStudio').innerText = `Studio: ${oldest.studios[0] || 'Unknown'}`;
-                    document.getElementById('oldestImage').src = oldest.image || '';
+                    document.getElementById('oldestImage').src = oldest.image || DEFAULT_IMG;
                 }
 
                 if (newest) {
                     document.getElementById('newestTitle').innerText = newest.title_en;
                     document.getElementById('newestYear').innerText = `Année: ${newest.year}`;
                     document.getElementById('newestStudio').innerText = `Studio: ${newest.studios[0] || 'Unknown'}`;
-                    document.getElementById('newestImage').src = newest.image || '';
+                    document.getElementById('newestImage').src = newest.image || DEFAULT_IMG;
                 }
 
                 const topFileTitle = [...library].sort((a, b) => b.local_files - a.local_files)[0];
@@ -766,7 +869,8 @@
                         decades[decade] = (decades[decade] || 0) + 1;
                     }
                 });
-                new Chart(document.getElementById('decadeChart'), {
+                if (chartInstances.decadeChart) chartInstances.decadeChart.destroy();
+                chartInstances.decadeChart = new Chart(document.getElementById('decadeChart'), {
                     type: 'bar',
                     data: {
                         labels: Object.keys(decades).sort().map(d => `${d}s`),
@@ -790,7 +894,8 @@
                     if (i.year) years[i.year] = (years[i.year] || 0) + 1;
                 });
                 const sortedYears = Object.keys(years).sort().slice(-10);
-                new Chart(document.getElementById('yearlyChart'), {
+                if (chartInstances.yearlyChart) chartInstances.yearlyChart.destroy();
+                chartInstances.yearlyChart = new Chart(document.getElementById('yearlyChart'), {
                     type: 'line',
                     data: {
                         labels: sortedYears,
@@ -812,7 +917,8 @@
                 });
 
                 const topDownloads = [...library].sort((a, b) => b.local_files - a.local_files).slice(0, 10);
-                new Chart(document.getElementById('topDownloadsChart'), {
+                if (chartInstances.topDownloadsChart) chartInstances.topDownloadsChart.destroy();
+                chartInstances.topDownloadsChart = new Chart(document.getElementById('topDownloadsChart'), {
                     type: 'bar',
                     data: {
                         labels: topDownloads.map(d => d.title_en.substring(0, 25) + (d.title_en.length > 25 ? '...' : '')),
@@ -838,7 +944,8 @@
                     });
                 });
                 const sortedDates = Object.keys(dailyMap).sort().slice(-30);
-                new Chart(document.getElementById('dailyActivityChart'), {
+                if (chartInstances.dailyActivityChart) chartInstances.dailyActivityChart.destroy();
+                chartInstances.dailyActivityChart = new Chart(document.getElementById('dailyActivityChart'), {
                     type: 'line',
                     data: {
                         labels: sortedDates,
@@ -859,7 +966,6 @@
                     }
                 });
 
-                // --- FIX: CHART VARIABLES (RENAMED TO hoursLabels) ---
                 const hourlyMap = {};
                 library.forEach(i => {
                     i.dates.forEach(d => {
@@ -868,7 +974,8 @@
                     });
                 });
                 const hoursLabels = Array.from({ length: 24 }, (_, i) => i);
-                new Chart(document.getElementById('hourlyChart'), {
+                if (chartInstances.hourlyChart) chartInstances.hourlyChart.destroy();
+                chartInstances.hourlyChart = new Chart(document.getElementById('hourlyChart'), {
                     type: 'bar',
                     data: {
                         labels: hoursLabels.map(h => `${h}h`),
@@ -888,7 +995,8 @@
                 });
 
                 const topStudiosVol = Object.entries(studioStats).sort((a, b) => b[1].files - a[1].files).slice(0, 10);
-                new Chart(document.getElementById('studioVolumeChart'), {
+                if (chartInstances.studioVolumeChart) chartInstances.studioVolumeChart.destroy();
+                chartInstances.studioVolumeChart = new Chart(document.getElementById('studioVolumeChart'), {
                     type: 'bar',
                     data: {
                         labels: topStudiosVol.map(s => s[0]),
@@ -915,7 +1023,8 @@
                         demos['Inconnu'] = (demos['Inconnu'] || 0) + 1;
                     }
                 });
-                new Chart(document.getElementById('demographicsChart'), {
+                if (chartInstances.demographicsChart) chartInstances.demographicsChart.destroy();
+                chartInstances.demographicsChart = new Chart(document.getElementById('demographicsChart'), {
                     type: 'pie',
                     data: {
                         labels: Object.keys(demos),
@@ -935,7 +1044,8 @@
                     if (cleanSources[k] !== undefined) cleanSources[k] += v;
                     else cleanSources['Autre'] += v;
                 });
-                new Chart(document.getElementById('sourceChart'), {
+                if (chartInstances.sourceChart) chartInstances.sourceChart.destroy();
+                chartInstances.sourceChart = new Chart(document.getElementById('sourceChart'), {
                     type: 'doughnut',
                     data: {
                         labels: Object.keys(cleanSources),
@@ -949,7 +1059,8 @@
                 });
 
                 const topGenres = Object.entries(genreStats).sort((a, b) => b[1] - a[1]).slice(0, 7);
-                new Chart(document.getElementById('genrePolarChart'), {
+                if (chartInstances.genrePolarChart) chartInstances.genrePolarChart.destroy();
+                chartInstances.genrePolarChart = new Chart(document.getElementById('genrePolarChart'), {
                     type: 'radar',
                     data: {
                         labels: topGenres.map(g => g[0]),
@@ -985,7 +1096,8 @@
                     });
                 });
                 const topGenreFiles = Object.entries(genreFiles).sort((a, b) => b[1] - a[1]).slice(0, 10);
-                new Chart(document.getElementById('genreFilesChart'), {
+                if (chartInstances.genreFilesChart) chartInstances.genreFilesChart.destroy();
+                chartInstances.genreFilesChart = new Chart(document.getElementById('genreFilesChart'), {
                     type: 'bar',
                     data: {
                         labels: topGenreFiles.map(g => g[0]),
@@ -1015,7 +1127,8 @@
                     else if (s < 9) scoreRanges['8-9']++;
                     else scoreRanges['9-10']++;
                 });
-                new Chart(document.getElementById('scoreDistChart'), {
+                if (chartInstances.scoreDistChart) chartInstances.scoreDistChart.destroy();
+                chartInstances.scoreDistChart = new Chart(document.getElementById('scoreDistChart'), {
                     type: 'bar',
                     data: {
                         labels: Object.keys(scoreRanges),
@@ -1034,24 +1147,46 @@
                     }
                 });
 
-                new Chart(document.getElementById('scatterChart'), {
+                const scatterData = library.map(i => ({ x: i.local_files, y: i.score || 0, title: i.title_en }));
+                if (chartInstances.scatterChart) chartInstances.scatterChart.destroy();
+                chartInstances.scatterChart = new Chart(document.getElementById('scatterChart'), {
                     type: 'scatter',
                     data: {
                         datasets: [{
                             label: 'Titres',
-                            data: library.map(i => ({ x: i.local_files, y: i.score || 0 })),
-                            backgroundColor: 'rgba(139, 92, 246, 0.6)',
+                            data: scatterData,
+                            backgroundColor: 'rgba(139, 92, 246, 0.7)',
                             borderColor: '#8b5cf6',
-                            borderWidth: 1
+                            borderWidth: 1,
+                            pointRadius: 6, // Points plus gros
+                            pointHoverRadius: 9
                         }]
                     },
                     options: {
                         responsive: true,
                         maintainAspectRatio: false,
-                        plugins: { legend: { display: false } },
+                        plugins: { 
+                            legend: { display: false },
+                            tooltip: {
+                                callbacks: {
+                                    label: function(context) {
+                                        const item = context.raw;
+                                        return `${item.title} (${item.y}★ | ${item.x} fichiers)`;
+                                    }
+                                }
+                            }
+                        },
                         scales: {
-                            x: { title: { display: true, text: 'Fichiers' }, grid: { color: '#1e293b' } },
-                            y: { title: { display: true, text: 'Note' }, grid: { color: '#1e293b' } }
+                            x: { 
+                                title: { display: true, text: 'Volume de Fichiers', color: '#94a3b8' }, 
+                                grid: { color: '#334155' },
+                                ticks: { color: '#cbd5e1' }
+                            },
+                            y: { 
+                                title: { display: true, text: 'Note Moyenne', color: '#94a3b8' }, 
+                                grid: { color: '#334155' },
+                                ticks: { color: '#cbd5e1' }
+                            }
                         }
                     }
                 });
@@ -1064,51 +1199,69 @@
             }
         }
 
-        function renderTable(sortMode) {
-            const tbody = document.getElementById('leaderboardBody');
-            tbody.innerHTML = '';
-
-            document.getElementById('btnFiles').className = sortMode === 'files' ? 'px-3 py-1 bg-primary text-white rounded' : 'px-3 py-1 bg-surface border border-gray-600 text-gray-300 rounded hover:bg-gray-700';
-            document.getElementById('btnScore').className = sortMode === 'score' ? 'px-3 py-1 bg-primary text-white rounded' : 'px-3 py-1 bg-surface border border-gray-600 text-gray-300 rounded hover:bg-gray-700';
-
+        function renderTable(sortBy = 'files') {
             let sorted = [...library];
-            if (sortMode === 'files') sorted.sort((a, b) => b.local_files - a.local_files);
-            if (sortMode === 'score') sorted.sort((a, b) => (b.score || 0) - (a.score || 0));
 
-            sorted.forEach((item, idx) => {
-                let rankStyle = "text-gray-500";
-                if (idx === 0) rankStyle = "text-yellow-400 font-bold";
-                if (idx === 1) rankStyle = "text-gray-300 font-bold";
-                if (idx === 2) rankStyle = "text-orange-400 font-bold";
+            if (sortBy === 'files') {
+                sorted.sort((a, b) => b.local_files - a.local_files);
+            } else if (sortBy === 'score') {
+                sorted.sort((a, b) => (b.score || 0) - (a.score || 0));
+            } else if (sortBy === 'year') {
+                sorted.sort((a, b) => (b.year || 0) - (a.year || 0));
+            }
 
-                const tr = document.createElement('tr');
-                tr.className = "hover:bg-white/5 transition border-b border-gray-800/50";
-                tr.innerHTML = `
-                    <td class="px-6 py-4 ${rankStyle}">#${idx + 1}</td>
-                    <td class="px-6 py-4 flex items-center gap-3">
-                        <div class="w-10 h-10 rounded bg-gray-800 flex-shrink-0 overflow-hidden">
-                            <img src="${item.image}" class="w-full h-full object-cover" onerror="this.src='data:image/svg+xml,%3Csvg xmlns=%22http://www.w3.org/2000/svg%22 width=%2240%22 height=%2240%22%3E%3Crect fill=%22%231e293b%22 width=%2240%22 height=%2240%22/%3E%3C/svg%3E'">
-                        </div>
-                        <a href="${item.url}" target="_blank" class="text-white font-medium truncate max-w-[250px] hover:text-primary transition hover:underline">${item.title_en} <i class="fa-solid fa-arrow-up-right-from-square text-[10px] ml-1 opacity-50"></i></a>
-                    </td>
-                    <td class="px-6 py-4 text-xs text-gray-400">${item.year || '-'}</td>
-                    <td class="px-6 py-4 text-xs text-accent">${item.studios[0] || '-'}</td>
-                    <td class="px-6 py-4 text-xs text-gray-400">${item.genres.slice(0, 2).join(', ') || '-'}</td>
-                    <td class="px-6 py-4 text-right font-mono text-gray-300">${item.local_files}</td>
-                    <td class="px-6 py-4 text-right font-bold text-yellow-500">${item.score || '-'}</td>
+            const tbody = document.getElementById('leaderboardBody'); 
+            tbody.innerHTML = ''; 
+
+            sorted.forEach((item, index) => {
+                const row = tbody.insertRow();
+                row.className = 'border-b border-surface/50 hover:bg-surface/50 transition duration-150';
+
+                // Rang
+                let rankCell = row.insertCell();
+                rankCell.className = 'px-6 py-4 text-center font-bold text-lg';
+                rankCell.innerHTML = `<span class="${index < 3 ? 'text-gold' : 'text-gray-400'}">#${index + 1}</span>`;
+
+                // Titre
+                let titleCell = row.insertCell();
+                titleCell.className = 'px-6 py-4 font-medium text-white flex items-center space-x-3';
+                titleCell.innerHTML = `
+                    <div class="h-10 w-10 flex-shrink-0 overflow-hidden rounded-md">
+                        <img src="${item.image || DEFAULT_IMG}" class="w-full h-full object-cover" onerror="this.src='${DEFAULT_IMG}'">
+                    </div>
+                    <div>
+                        <a href="${item.url}" target="_blank" class="text-white font-medium truncate max-w-[250px] hover:text-primary transition hover:underline">${item.title_en}</a>
+                        <p class="text-xs text-gray-400">Saison: ${item.db_season}</p>
+                    </div>
                 `;
-                tbody.appendChild(tr);
+                // Année
+                let yearCell = row.insertCell();
+                yearCell.className = 'px-6 py-4 text-xs text-gray-400';
+                yearCell.innerText = item.year || '-';
+
+                // Studio
+                let studioCell = row.insertCell();
+                studioCell.className = 'px-6 py-4 text-xs text-accent';
+                studioCell.innerText = item.studios[0] || '-';
+
+                // Genre
+                let genreCell = row.insertCell();
+                genreCell.className = 'px-6 py-4 text-xs text-gray-400';
+                genreCell.innerText = item.genres.slice(0, 2).join(', ') || '-';
+
+                // Fichiers
+                let filesCell = row.insertCell();
+                filesCell.className = 'px-6 py-4 text-right font-mono text-gray-300';
+                filesCell.innerText = item.local_files;
+
+                // Note
+                let scoreCell = row.insertCell();
+                scoreCell.className = 'px-6 py-4 text-center font-bold';
+                scoreCell.innerHTML = item.score ? `<span class="text-gold">${item.score.toFixed(2)}</span>` : '<span class="text-red-400">N/A</span>';
             });
         }
 
-        function hardReset() {
-            if (confirm("⚠️ Effacer tout le cache local et recharger ?")) {
-                localStorage.clear();
-                location.reload();
-            }
-        }
-
-        init();
+        document.addEventListener('DOMContentLoaded', init);
     </script>
 </body>
 
