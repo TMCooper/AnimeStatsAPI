@@ -8,7 +8,7 @@ Le projet enrichit les données locales avec des métadonnées externes via l'AP
 
 *   **Collecte de données** : Endpoint simple pour enregistrer l'anime, la saison et l'épisode visionné.
 *   **Stockage Persistant** : Utilisation de SQLite pour une base de données locale légère et rapide.
-*   **Dashboard Analytique** : Interface web moderne (TailwindCSS + Chart.js) proposant :
+*   **Dashboard Analytique** : Interface web moderne proposant :
     *   Statistiques globales (temps passé, nombre d'épisodes).
     *   Graphiques d'activité (horaire, quotidienne, annuelle).
     *   Répartition par genres et studios.
