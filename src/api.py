@@ -37,4 +37,5 @@ class Yui:
 
     @app.route("/api/renderStats", methods=["GET"])
     def renderStats():
-        return render_template("index.html", token=ADMIN_PASSWORD)
+        return jsonify({"status": "Offline", "info": "The site is actually on update for new ui"})
+        # return render_template("index.html", token=ADMIN_PASSWORD)
